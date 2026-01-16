@@ -1,179 +1,137 @@
-import sqlite3
-import time
-import pytz
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, Defaults
-
-# Selenium Importları
+import sqlite3, pytz, logging, time
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, Defaults
 
-# --- LOG SİSTEMİ ---
+# Log Ayarları
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-
 TOKEN = "8218587809:AAHhXE8kP9VinHvLaOSF-r6DEg6IA6NonQk"
 
-# --- VERİTABANI İŞLEMLERİ ---
 def db_kur():
     conn = sqlite3.connect('debis_bot.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS kullanicilar 
-                 (user_id INTEGER PRIMARY KEY, email TEXT, sifre TEXT, periyot INTEGER)''')
-    conn.commit()
+    conn.execute('CREATE TABLE IF NOT EXISTS kullanicilar (user_id INTEGER PRIMARY KEY, email TEXT, sifre TEXT, periyot INTEGER)')
     conn.close()
-    print("📂 Veritabanı dosyası hazır.")
 
-# --- SELENIUM TARAMA FONKSİYONU ---
-def notlari_tara(email, sifre):
-    print(f"🔄 {email} için tarama başlatılıyor...")
-    chrome_options = Options()
-    chrome_options.add_argument("--headless") 
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    # Sunucularda hata almamak için binary yerini belirtiyoruz
-    chrome_options.binary_location = "/usr/bin/google-chrome"
-    
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    wait = WebDriverWait(driver, 15)
-    sonuc = ""
+def get_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=options)
+
+async def mesaj_gonder(context, chat_id, text):
+    # Uzun mesajları parçalara böler (Markdown hatası almamak için düz metin)
+    if len(text) <= 4000:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+    else:
+        for i in range(0, len(text), 4000):
+            await context.bot.send_message(chat_id=chat_id, text=text[i:i+4000])
+
+def notlari_tara_selenium(email, sifre):
+    driver = get_driver()
     try:
-        print("🔗 SSO Giriş sayfasına bağlanılıyor...")
-        driver.get("https://sso.deu.edu.tr:8443/realms/dokuzeylul/protocol/openid-connect/auth?client_id=debis-client&redirect_uri=https%3A%2F%2Fdebis.deu.edu.tr%2Fsso_callback.php&response_type=code&scope=openid+profile+email")
-        
-        wait.until(EC.presence_of_element_located((By.ID, "username"))).send_keys(email)
+        driver.get("https://debis.deu.edu.tr/OgrenciIsleri/Ogrenci/OgrenciNotu/index.php")
+        # SSO Giriş
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "username"))).send_keys(email)
         driver.find_element(By.ID, "password").send_keys(sifre)
         driver.find_element(By.ID, "kc-login").click()
         
-        print("🔑 Giriş yapıldı, notlar sayfası açılıyor...")
-        time.sleep(2)
-        driver.get("https://debis.deu.edu.tr/OgrenciIsleri/Ogrenci/OgrenciNotu/index.php")
+        # Sayfanın yüklenmesini bekle
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "ders")))
         
-        # Dönem seçimi (323 = 2025 Güz)
-        donem_dropdown = wait.until(EC.presence_of_element_located((By.ID, "ogretim_donemi_id")))
-        Select(donem_dropdown).select_by_value("323")
-        time.sleep(2)
-
-        ders_menu = driver.find_element(By.ID, "ders")
-        dersler = [(opt.get_attribute("value"), opt.text) for opt in Select(ders_menu).options if opt.get_attribute("value") != ""]
-
-        if not dersler:
-            return "❌ Dersler bulunamadı. Lütfen bilgileri kontrol et."
-
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        ders_select = soup.find('select', id='ders')
+        dersler = [(opt['value'], opt.text) for opt in ders_select.find_all('option') if opt['value']]
+        
+        sonuc = "📊 ANLIK NOTLARIN:\n"
         for d_id, d_adi in dersler:
-            driver.execute_script(f"document.getElementById('ders').value = '{d_id}';")
-            driver.execute_script("form_ders_submit();")
-            time.sleep(3)
+            driver.find_element(By.XPATH, f"//option[@value='{d_id}']").click()
+            time.sleep(1) # Tablonun yenilenmesi için kısa bekleme
             
-            sonuc += f"\n📖 *{d_adi}*\n"
-            rows = driver.find_elements(By.XPATH, "//table//table//tr")
+            s_soup = BeautifulSoup(driver.page_source, 'html.parser')
+            sonuc += f"\n📖 {d_adi}\n"
             found = False
-            for row in rows:
-                cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) == 5:
-                    adi, notu = cols[0].text.strip(), cols[4].text.strip()
-                    if any(x in adi for x in ["Vize", "Final", "Başarı Notu", "Quiz", "Bütünleme"]):
-                        val = notu if notu else "Yok"
-                        sonuc += f" - {adi}: `{val}`\n"
-                        found = True
-            if not found: sonuc += " - Not girişi henüz yok.\n"
             
+            for tablo in s_soup.find_all('table'):
+                if "SİZİN NOTUNUZ" in tablo.text:
+                    for row in tablo.find_all('tr')[1:]:
+                        cols = row.find_all('td')
+                        if len(cols) >= 5:
+                            adi, notu = cols[0].text.strip(), cols[4].text.strip()
+                            if any(x in adi for x in ["Vize", "Final", "Başarı Notu", "Quiz", "Bütünleme"]):
+                                val = "Yok" if "İLAN EDİLMEMİŞ" in notu or notu == "" else notu
+                                sonuc += f" - {adi}: {val}\n"
+                                found = True
+                    break
+            if not found: sonuc += " - Not girişi henüz yok.\n"
+        return sonuc
     except Exception as e:
-        print(f"❌ Tarama Hatası: {e}")
-        sonuc = "❌ Not çekme sırasında hata oluştu!"
+        return f"Hata: {str(e)}"
     finally:
         driver.quit()
-    return sonuc
 
-# --- BOT KOMUTLARI ---
+# --- Bot Komutları ---
+async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await u.message.reply_text("🚀 Bot Aktif! /kayit email sifre dakika")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *DEBİS Dakika Takip Botu Aktif!*\n\n"
-        "Kayıt formatı:\n"
-        "`/kayit email sifre dakika` \n\n"
-        "Örnek: `/kayit hasan@ogr.deu.edu.tr 12345 30` (Her 30 dk bir kontrol)", 
-        parse_mode="Markdown"
-    )
-
-async def kayit_ol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if len(context.args) < 3:
-            return await update.message.reply_text("❌ Hata! Lütfen `/kayit email sifre dakika` şeklinde yaz.")
-        
-        email = context.args[0]
-        sifre = context.args[1]
-        dakika = int(context.args[2])
-        user_id = update.effective_user.id
-        
-        conn = sqlite3.connect('debis_bot.db')
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO kullanicilar VALUES (?, ?, ?, ?)", (user_id, email, sifre, dakika))
-        conn.commit()
-        conn.close()
-        
-        await update.message.reply_text(f"✅ Kaydedildi! İlk notlar çekiliyor...")
-
-        # İLK KONTROL
-        ilk_sonuc = notlari_tara(email, sifre)
-        await update.message.reply_text(f"📊 *ANLIK NOTLARIN:*\n{ilk_sonuc}", parse_mode="Markdown")
-
-        # OTOMATİK DÖNGÜ (DAKİKA BAZLI)
-        job_name = str(user_id)
-        current_jobs = context.job_queue.get_jobs_by_name(job_name)
-        for job in current_jobs: job.schedule_removal()
-        
-        saniye_aralik = dakika * 60
-        context.job_queue.run_repeating(otomatik_kontrol, interval=saniye_aralik, first=saniye_aralik, chat_id=user_id, name=job_name)
-        
-        await update.message.reply_text(f"🕒 Takip başlatıldı. Her {dakika} dakikada bir kontrol yapacağım.")
-
-    except Exception as e:
-        await update.message.reply_text("❌ Hata oluştu! Lütfen sayıları doğru girdiğinden emin ol.")
-
-async def manuel_kontrol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect('debis_bot.db'); c = conn.cursor()
-    c.execute("SELECT email, sifre FROM kullanicilar WHERE user_id=?", (user_id,))
-    user = c.fetchone(); conn.close()
-    if not user:
-        return await update.message.reply_text("❌ Önce `/kayit` yapmalısın.")
-    await update.message.reply_text("🔍 Notlar çekiliyor...")
-    mesaj = notlari_tara(user[0], user[1])
-    await update.message.reply_text(mesaj, parse_mode="Markdown")
-
-async def bilgi_sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect('debis_bot.db'); c = conn.cursor()
-    c.execute("DELETE FROM kullanicilar WHERE user_id=?", (user_id,))
+async def kayit_ol(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if len(c.args) < 3: return await u.message.reply_text("❌ Kullanım: /kayit email sifre dakika")
+    e, s, dk = c.args[0], c.args[1], int(c.args[2])
+    
+    conn = sqlite3.connect('debis_bot.db')
+    conn.execute("INSERT OR REPLACE INTO kullanicilar VALUES (?,?,?,?)", (u.effective_user.id, e, s, dk))
     conn.commit(); conn.close()
-    jobs = context.job_queue.get_jobs_by_name(str(user_id))
-    for j in jobs: j.schedule_removal()
-    await update.message.reply_text("🗑️ Bilgiler silindi.")
+    
+    await u.message.reply_text("✅ Kaydedildi, notlar getiriliyor (Selenium başlatılıyor)...")
+    res = notlari_tara_selenium(e, s)
+    await mesaj_gonder(c, u.effective_user.id, res)
+    
+    # JobQueue kontrolü
+    if c.job_queue:
+        job_name = str(u.effective_user.id)
+        for j in c.job_queue.get_jobs_by_name(job_name): j.schedule_removal()
+        c.job_queue.run_repeating(otomatik_kontrol, interval=dk*60, first=dk*60, chat_id=u.effective_user.id, name=job_name)
+    else:
+        await u.message.reply_text("⚠️ Uyarı: Otomatik kontrol sistemi başlatılamadı (JobQueue eksik).")
 
-async def otomatik_kontrol(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    conn = sqlite3.connect('debis_bot.db'); c = conn.cursor()
-    c.execute("SELECT email, sifre FROM kullanicilar WHERE user_id=?", (job.chat_id,))
-    user = c.fetchone(); conn.close()
+async def kontrol(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('debis_bot.db')
+    user = conn.execute("SELECT email, sifre FROM kullanicilar WHERE user_id=?", (u.effective_user.id,)).fetchone()
+    conn.close()
     if user:
-        mesaj = notlari_tara(user[0], user[1])
-        await context.bot.send_message(chat_id=job.chat_id, text=f"🔔 *OTOMATİK KONTROL SONUCU:*\n{mesaj}", parse_mode="Markdown")
+        await u.message.reply_text("🔍 Güncel notlar taranıyor...")
+        res = notlari_tara_selenium(user[0], user[1])
+        await mesaj_gonder(c, u.effective_user.id, res)
+
+async def sil(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('debis_bot.db')
+    conn.execute("DELETE FROM kullanicilar WHERE user_id=?", (u.effective_user.id,))
+    conn.commit(); conn.close()
+    if c.job_queue:
+        for j in c.job_queue.get_jobs_by_name(str(u.effective_user.id)): j.schedule_removal()
+    await u.message.reply_text("🗑️ Bilgileriniz silindi.")
+
+async def otomatik_kontrol(c: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('debis_bot.db')
+    user = conn.execute("SELECT email, sifre FROM kullanicilar WHERE user_id=?", (c.job.chat_id,)).fetchone()
+    conn.close()
+    if user:
+        res = notlari_tara_selenium(user[0], user[1])
+        await mesaj_gonder(c, c.job.chat_id, f"🔔 OTOMATİK KONTROL SONUCU:\n{res}")
 
 if __name__ == '__main__':
     db_kur()
-    istanbul_tz = pytz.timezone("Europe/Istanbul")
-    defaults = Defaults(tzinfo=istanbul_tz)
-    app = Application.builder().token(TOKEN).defaults(defaults).build()
-    
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("kayit", kayit_ol))
-    app.add_handler(CommandHandler("kontrol", manuel_kontrol))
-    app.add_handler(CommandHandler("sil", bilgi_sil))
-    
+    app.add_handler(CommandHandler("kontrol", kontrol))
+    app.add_handler(CommandHandler("sil", sil))
     app.run_polling()
