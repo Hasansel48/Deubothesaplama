@@ -13,71 +13,69 @@ def db_kur():
     conn.execute('CREATE TABLE IF NOT EXISTS kullanicilar (user_id INTEGER PRIMARY KEY, email TEXT, sifre TEXT, periyot INTEGER)')
     conn.close()
 
-# --- REQUESTS TABANLI HIZLI TARAMA ---
+# --- HIZLI NOT TARAMA (GÜNCELLENMİŞ) ---
 def notlari_tara_fast(email, sifre):
     session = requests.Session()
-    # DEBİS'i bot olmadığımıza ikna eden başlıklar
+    # Sertifika hatalarını gizlemek için (terminalde çirkin durmasın diye)
+    requests.packages.urllib3.disable_warnings()
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
     }
     
     try:
-        # 1. Giriş Sayfasını ve Gerekli Form URL'sini Al
+        # 1. Giriş Sayfası (verify=False eklendi)
         login_url = "https://sso.deu.edu.tr:8443/realms/dokuzeylul/protocol/openid-connect/auth?client_id=debis-client&redirect_uri=https%3A%2F%2Fdebis.deu.edu.tr%2Fsso_callback.php&response_type=code&scope=openid+profile+email"
-        res = session.get(login_url, headers=headers)
+        res = session.get(login_url, headers=headers, verify=False)
         soup = BeautifulSoup(res.text, 'html.parser')
         
         form = soup.find('form', id='kc-form-login')
-        if not form: return "❌ DEBİS giriş sayfası şu an açılmıyor."
+        if not form: return "❌ Giriş ekranı yüklenemedi."
         action_url = form['action']
 
-        # 2. Giriş Yap (Post)
+        # 2. Giriş Yap (verify=False eklendi)
         payload = {'username': email, 'password': sifre, 'credentialId': ''}
-        headers['Referer'] = login_url # Güvenlik için şart
-        login_res = session.post(action_url, data=payload, headers=headers, allow_redirects=True)
+        headers['Referer'] = login_url
+        login_res = session.post(action_url, data=payload, headers=headers, allow_redirects=True, verify=False)
         
         if "Geçersiz kullanıcı adı veya parola" in login_res.text:
-            return "❌ Hatalı e-posta veya şifre girdin."
+            return "❌ Hatalı e-posta veya şifre."
 
-        # 3. Not Sayfasına ve Döneme Eriş (2025 Güz: 323)
+        # 3. Not Sayfası (verify=False eklendi)
         not_url = "https://debis.deu.edu.tr/OgrenciIsleri/Ogrenci/OgrenciNotu/index.php"
-        res = session.post(not_url, data={'ogretim_donemi_id': '323'}, headers=headers)
+        res = session.post(not_url, data={'ogretim_donemi_id': '323'}, headers=headers, verify=False)
         soup = BeautifulSoup(res.text, 'html.parser')
         
         ders_select = soup.find('select', id='ders')
-        if not ders_select: return "❌ Not sayfasına girilemedi. Lütfen bilgileri kontrol et."
+        if not ders_select: return "❌ Not sayfasına ulaşılamadı."
         
         dersler = [(opt['value'], opt.text) for opt in ders_select.find_all('option') if opt['value']]
         
         sonuc = ""
         for d_id, d_adi in dersler:
-            # Her ders için veriyi çek
             headers['Referer'] = not_url
-            res = session.post(not_url, data={'ogretim_donemi_id': '323', 'ders': d_id}, headers=headers)
+            res = session.post(not_url, data={'ogretim_donemi_id': '323', 'ders': d_id}, headers=headers, verify=False)
             s_soup = BeautifulSoup(res.text, 'html.parser')
             
             sonuc += f"\n📖 *{d_adi}*\n"
             found = False
-            # Tabloları tara ve not tablosunu bul
             for tablo in s_soup.find_all('table'):
                 if "Sınav Adı" in tablo.text:
                     for row in tablo.find_all('tr'):
                         cols = row.find_all('td')
                         if len(cols) >= 5:
                             adi, notu = cols[0].text.strip(), cols[4].text.strip()
-                            if any(x in adi for x in ["Vize", "Final", "Başarı", "Quiz", "Bütünleme"]):
+                            if any(x in adi for x in ["Vize", "Final", "Başarı", "Quiz"]):
                                 sonuc += f" - {adi}: `{notu if notu else 'Yok'}`\n"
                                 found = True
                     break
-            if not found: sonuc += " - Henüz not girişi yok.\n"
+            if not found: sonuc += " - Not girişi yok.\n"
         
         return sonuc if sonuc else "🔍 Ders kaydı bulunamadı."
         
     except Exception as e:
         logging.error(f"Hata: {e}")
-        return "❌ DEBİS bağlantısı kurulamadı. Lütfen tekrar dene."
+        return "❌ DEBİS bağlantı hatası (SSL)."
 
 # --- TELEGRAM KOMUTLARI ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -134,3 +132,4 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("kontrol", manuel_kontrol))
     app.add_handler(CommandHandler("sil", sil))
     app.run_polling()
+
