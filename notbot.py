@@ -28,7 +28,6 @@ def get_driver():
     return webdriver.Chrome(service=service, options=options)
 
 async def mesaj_gonder(context, chat_id, text):
-    # Uzun mesajları parçalara böler (Markdown hatası almamak için düz metin)
     if len(text) <= 4000:
         await context.bot.send_message(chat_id=chat_id, text=text)
     else:
@@ -54,7 +53,7 @@ def notlari_tara_selenium(email, sifre):
         sonuc = "📊 ANLIK NOTLARIN:\n"
         for d_id, d_adi in dersler:
             driver.find_element(By.XPATH, f"//option[@value='{d_id}']").click()
-            time.sleep(1) # Tablonun yenilenmesi için kısa bekleme
+            time.sleep(1) 
             
             s_soup = BeautifulSoup(driver.page_source, 'html.parser')
             sonuc += f"\n📖 {d_adi}\n"
@@ -78,7 +77,7 @@ def notlari_tara_selenium(email, sifre):
     finally:
         driver.quit()
 
-# --- Bot Komutları ---
+# --- Komutlar ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("🚀 Bot Aktif! /kayit email sifre dakika")
 
@@ -90,17 +89,19 @@ async def kayit_ol(u: Update, c: ContextTypes.DEFAULT_TYPE):
     conn.execute("INSERT OR REPLACE INTO kullanicilar VALUES (?,?,?,?)", (u.effective_user.id, e, s, dk))
     conn.commit(); conn.close()
     
-    await u.message.reply_text("✅ Kaydedildi, notlar getiriliyor (Selenium başlatılıyor)...")
+    await u.message.reply_text("✅ Kaydedildi, Selenium ile notlar taranıyor...")
     res = notlari_tara_selenium(e, s)
     await mesaj_gonder(c, u.effective_user.id, res)
     
-    # JobQueue kontrolü
+    # JobQueue Güvenli Başlatma
     if c.job_queue:
         job_name = str(u.effective_user.id)
+        # Varsa eski görevleri sil
         for j in c.job_queue.get_jobs_by_name(job_name): j.schedule_removal()
+        # Yeni görevi ekle
         c.job_queue.run_repeating(otomatik_kontrol, interval=dk*60, first=dk*60, chat_id=u.effective_user.id, name=job_name)
     else:
-        await u.message.reply_text("⚠️ Uyarı: Otomatik kontrol sistemi başlatılamadı (JobQueue eksik).")
+        await u.message.reply_text("⚠️ JobQueue hatası: Otomatik kontrol şu an yapılamıyor.")
 
 async def kontrol(u: Update, c: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('debis_bot.db')
@@ -125,10 +126,11 @@ async def otomatik_kontrol(c: ContextTypes.DEFAULT_TYPE):
     conn.close()
     if user:
         res = notlari_tara_selenium(user[0], user[1])
-        await mesaj_gonder(c, c.job.chat_id, f"🔔 OTOMATİK KONTROL SONUCU:\n{res}")
+        await mesaj_gonder(c, c.job.chat_id, f"🔔 OTOMATİK KONTROL:\n{res}")
 
 if __name__ == '__main__':
     db_kur()
+    # Application builder artık JobQueue'yu otomatik tanıyacak
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("kayit", kayit_ol))
