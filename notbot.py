@@ -11,14 +11,16 @@ def db_kur():
     conn.execute('CREATE TABLE IF NOT EXISTS kullanicilar (user_id INTEGER PRIMARY KEY, email TEXT, sifre TEXT, periyot INTEGER)')
     conn.close()
 
-async def mesaj_gonder_bolerek(update, context, chat_id, text):
-    # Mesaj gönderme mantığını düzelttim
+async def mesaj_gonder_bolerek(context, chat_id, text):
     bot = context.bot
-    if len(text) <= 4096:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    # Markdown hatası almamak için düz metin gönderiyoruz
+    if len(text) <= 4000:
+        await bot.send_message(chat_id=chat_id, text=text)
     else:
-        for i in range(0, len(text), 4096):
-            await bot.send_message(chat_id=chat_id, text=text[i:i+4096], parse_mode="Markdown")
+        # Mesajı güvenli yerlerden böl
+        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks:
+            await bot.send_message(chat_id=chat_id, text=chunk)
 
 def notlari_tara_fast(email, sifre):
     session = requests.Session()
@@ -34,21 +36,21 @@ def notlari_tara_fast(email, sifre):
         payload = {'username': email, 'password': sifre, 'credentialId': ''}
         session.post(action_url, data=payload, headers=headers, verify=False)
         
-        not_url = "https://debis.deu.edu.tr/OgrenciIsleri/Ogrenci/OgrenciNotu/index.php"
+        not_url = "https://debis.deu.edu.tr/OgrenciIssters/Ogrenci/OgrenciNotu/index.php"
         res = session.post(not_url, data={'ogretim_donemi_id': '323'}, headers=headers, verify=False)
         soup = BeautifulSoup(res.text, 'html.parser')
         
         ders_select = soup.find('select', id='ders')
-        if not ders_select: return "❌ Giriş başarısız. Bilgileri kontrol et."
+        if not ders_select: return "Giris basarisiz. Sifreni kontrol et."
         
         dersler = [(opt['value'], opt.text) for opt in ders_select.find_all('option') if opt['value']]
-        sonuc = "📊 *ANLIK NOTLARIN:*\n"
+        sonuc = "📊 ANLIK NOTLARIN:\n"
 
         for d_id, d_adi in dersler:
             res = session.post(not_url, data={'ogretim_donemi_id': '323', 'ders': d_id}, headers=headers, verify=False)
             s_soup = BeautifulSoup(res.text, 'html.parser')
             
-            sonuc += f"\n📖 *{d_adi}*\n"
+            sonuc += f"\n📖 {d_adi}\n"
             found = False
             
             for tablo in s_soup.find_all('table'):
@@ -60,32 +62,33 @@ def notlari_tara_fast(email, sifre):
                             adi = cols[0].text.strip()
                             notu = cols[4].text.strip()
                             
-                            # Filtreleme: Sadece istediğin sınav tiplerini al
+                            # Filtreleme
                             if any(x in adi for x in ["Vize", "Final", "Başarı Notu", "Quiz", "Bütünleme", "Arasınav", "Ödev"]):
-                                if "İLAN EDİLMEMİŞ" in notu or notu == "":
+                                if "İLAN EDİLMEMİŞ" in notu or notu == "" or notu == "None":
                                     notu = "Yok"
-                                sonuc += f" - {adi}: `{notu}`\n"
+                                sonuc += f" - {adi}: {notu}\n"
                                 found = True
                     break
             
             if not found:
-                sonuc += " - Not girişi henüz yok.\n"
+                sonuc += " - Not girisi henüz yok.\n"
         
         return sonuc
     except Exception as e:
-        return f"❌ Hata: {str(e)}"
+        return f"Hata: {str(e)}"
 
 # --- KOMUTLAR ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    await u.message.reply_text("🚀 Bot Aktif! `/kayit email sifre dakika` yaz.", parse_mode="Markdown")
+    await u.message.reply_text("Bot Aktif! /kayit email sifre dakika yaz.")
 
 async def kayit_ol(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if len(c.args) < 3: return await u.message.reply_text("❌ Eksik bilgi.")
+    if len(c.args) < 3: return await u.message.reply_text("Kullanim: /kayit email sifre dakika")
     e, s, dk = c.args[0], c.args[1], int(c.args[2])
     conn = sqlite3.connect('debis_bot.db'); conn.execute("INSERT OR REPLACE INTO kullanicilar VALUES (?,?,?,?)", (u.effective_user.id, e, s, dk)); conn.commit(); conn.close()
-    await u.message.reply_text("✅ Kaydedildi, notlar çekiliyor...")
+    await u.message.reply_text("Kaydedildi, notlar geliyor...")
     res = notlari_tara_fast(e, s)
-    await mesaj_gonder_bolerek(u, c, u.effective_user.id, res)
+    await mesaj_gonder_bolerek(c, u.effective_user.id, res)
+    
     job_name = str(u.effective_user.id)
     for j in c.job_queue.get_jobs_by_name(job_name): j.schedule_removal()
     c.job_queue.run_repeating(otomatik_kontrol, interval=dk*60, first=dk*60, chat_id=u.effective_user.id, name=job_name)
@@ -94,22 +97,22 @@ async def manuel_kontrol(u: Update, c: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('debis_bot.db'); user = conn.execute("SELECT email, sifre FROM kullanicilar WHERE user_id=?", (u.effective_user.id,)).fetchone(); conn.close()
     if user:
         res = notlari_tara_fast(user[0], user[1])
-        await mesaj_gonder_bolerek(u, c, u.effective_user.id, res)
+        await mesaj_gonder_bolerek(c, u.effective_user.id, res)
 
 async def sil(u: Update, c: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('debis_bot.db'); conn.execute("DELETE FROM kullanicilar WHERE user_id=?", (u.effective_user.id,)); conn.commit(); conn.close()
     for j in c.job_queue.get_jobs_by_name(str(u.effective_user.id)): j.schedule_removal()
-    await u.message.reply_text("🗑️ Bilgiler silindi.")
+    await u.message.reply_text("Bilgiler silindi.")
 
 async def otomatik_kontrol(c: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect('debis_bot.db'); user = conn.execute("SELECT email, sifre FROM kullanicilar WHERE user_id=?", (c.job.chat_id,)).fetchone(); conn.close()
     if user:
         res = notlari_tara_fast(user[0], user[1])
-        await mesaj_gonder_bolerek(None, c, c.job.chat_id, res)
+        await mesaj_gonder_bolerek(c, c.job.chat_id, f"🔔 OTOMATİK KONTROL:\n{res}")
 
 if __name__ == '__main__':
     db_kur()
-    app = Application.builder().token(TOKEN).defaults(Defaults(tzinfo=pytz.timezone("Europe/Istanbul"))).build()
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start)); app.add_handler(CommandHandler("kayit", kayit_ol))
     app.add_handler(CommandHandler("kontrol", manuel_kontrol)); app.add_handler(CommandHandler("sil", sil))
     app.run_polling()
